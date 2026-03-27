@@ -1,53 +1,51 @@
-from langgraph.graph import StateGraph, END
-from langgraph.checkpoint.memory import MemorySaver
+from typing import TypedDict, Annotated
 from operator import add
+from langgraph.graph import StateGraph, START, END
+from langgraph.checkpoint.memory import MemorySaver
 
-def add_points(state):
-    score = state.get("score", 0)
-    points = state.get("points", 0)
-    state["score"] = score + points
-    state["message"] = f"Added {points} points! Total score: {state['score']}"
-    return state
+# 1. Define a proper State Schema
+# The 'add' reducer is what allows the "Elephant" to remember and sum up.
+class GameState(TypedDict):
+    score: Annotated[int, add]
+    points: int
 
-# Build graph
-graph = StateGraph(dict)
-graph.add_node("add_points",
- add_points,
- reducers={"score": add}
- )
-graph.set_entry_point("add_points")
-graph.add_edge("add_points", END)
+# 2. Define the logic (Notice: we ONLY return the new points)
+def add_points_node(state: GameState):
+    p = state.get("points", 0)
+    return {"score": p} # Reducer handles: total = existing_score + p
 
-# WITHOUT memory - score resets each time
-print("=== WITHOUT Memory ===")
-app_no_memory = graph.compile()
+# 3. Build the Graph
+builder = StateGraph(GameState)
+builder.add_node("adder", add_points_node)
+builder.add_edge(START, "adder")
+builder.add_edge("adder", END)
 
-r1 = app_no_memory.invoke({"points": 10})
-print(r1["message"])  # Score: 10
+# --- THE COMPARISON ---
 
-r2 = app_no_memory.invoke({"points": 5})
-print(r2["message"])  # Score: 5 (resets!)
+# A. THE GOLDFISH (No Memory)
+# It resets every single time because there is no checkpointer.
+goldfish_app = builder.compile()
 
-# WITH memory - score persists
-print("\n=== WITH Memory ===")
+print("--- GOLDFISH (No Memory) ---")
+r1 = goldfish_app.invoke({"score": 0, "points": 10})
+print(f"Call 1 (Add 10): Total Score = {r1['score']}")
+
+r2 = goldfish_app.invoke({"points": 5}) 
+print(f"Call 2 (Add 5):  Total Score = {r2['score']} <- It forgot the 10!")
+
+
+# B. THE ELEPHANT (With Memory)
+# It uses the checkpointer to save state between calls.
 memory = MemorySaver()
-app_with_memory = graph.compile(checkpointer=memory)
+elephant_app = builder.compile(checkpointer=memory)
+config = {"configurable": {"thread_id": "player_1"}}
 
-# creates a configuration dictionary that identifies a specific conversation or session in 
-# LangGraph's checkpoint system.
-# config is just a Python dictionary with a specific structure that LangGraph expects
-# "configurable" is a required key that LangGraph looks for
-# "thread_id": "game_1" is a unique identifier for this particular conversation thread
+print("\n--- ELEPHANT (With Memory) ---")
+# Call 1: Start with 0, add 10
+r1 = elephant_app.invoke({"score": 0, "points": 10}, config=config)
+print(f"Call 1 (Add 10): Total Score = {r1['score']}")
 
-config = {"configurable": {"thread_id": "game_1"}}
-
-# First call- initialize score
-r1 = app_with_memory.invoke({ "score":0,"points": 10}, config=config)
-print(r1["message"])  # Score: 10
-# Second call- include score manually
-r2 = app_with_memory.invoke({ "score": r1["score"],"points": 5}, config=config)
-print(r2["message"])  # Score: 15
-
-# Third call -include score manually 
-r3 = app_with_memory.invoke({ "score": r2["score"],"points": 20}, config=config)
-print(r3["message"])  # Score: 35
+# Call 2: ONLY send the new points. 
+# LangGraph retrieves the 10 from memory automatically.
+r2 = elephant_app.invoke({"points": 5}, config=config)
+print(f"Call 2 (Add 5):  Total Score = {r2['score']} <- It remembered and added!")
